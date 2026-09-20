@@ -77,9 +77,20 @@ interface RawNanQuota {
 	periodEnd?: unknown;
 }
 
+export interface UsageProviderAdapter {
+	/** Provider id exactly as Pi reports it in `ctx.model.provider`. */
+	id: string;
+	/** What the surfaces say while this provider has no snapshot yet. */
+	pendingNote: string;
+	/** Reads this provider's own endpoint into the shared model. Absent when its
+	 *  windows only arrive in response headers (Claude), which needs no request. */
+	fetchUsage?(apiKey: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined>;
+}
+
 export const CODEX_PROVIDER = "openai-codex";
 export const ANTHROPIC_PROVIDER = "anthropic";
 export const NAN_PROVIDER = "nan";
+export const OPENCODE_GO_PROVIDER = "opencode-go";
 const ANTHROPIC_MAIN_LIMIT = "claude";
 const ANTHROPIC_PREFIX = "anthropic-ratelimit-unified-";
 const ANTHROPIC_WINDOWS: ReadonlyArray<[key: string, seconds: number]> = [
@@ -90,6 +101,12 @@ export const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 // The NaN Cloud dashboard backend; not part of NaN's published OpenAPI, so the
 // fetch that uses it is fixed-origin, redirect-refusing, and schema-validated.
 export const NAN_QUOTA_URL = "https://cloud-api.nan.builders/api/usage/quota";
+// The Go plan usage endpoint: the same one the opencode dashboard reads, with the
+// API key its connect flow already stores. It reports a used percentage per
+// window, each with the instant it resets.
+export const OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
+// The plan's own allowance carries the name; "go" is what the dashboard calls it.
+const OPENCODE_GO_LIMIT = "go";
 // The model's own allowance for the billing period carries no label: the model
 // id names it in the bar, and the reset text says what the window is in the
 // panel. Only a sub-window on top of it (a rolling `4h`) needs a name.
@@ -106,6 +123,13 @@ const MINUTE = 60;
 const HOUR = 3600;
 const DAY = 86_400;
 const WEEK = 604_800;
+// Window names the endpoint uses, each with the length it stands for, so the bar
+// and the panel can label them the way the dashboard does.
+const OPENCODE_GO_WINDOWS: ReadonlyArray<[key: string, seconds: number]> = [
+	["rolling", 5 * HOUR],
+	["weekly", WEEK],
+	["monthly", 30 * DAY],
+];
 const ROLE = {
 	PROVIDER: "text",
 	PLAN: "muted",
@@ -116,12 +140,23 @@ const ROLE = {
 	SEPARATOR: "muted",
 } as const;
 export const USAGE_EMPTY_MESSAGE = "No subscription usage yet. Usage arrives with the next response, or press r to fetch it.";
-export const SUPPORTED_USAGE_PROVIDERS: readonly string[] = [CODEX_PROVIDER, ANTHROPIC_PROVIDER, NAN_PROVIDER];
-const PENDING_NOTE: Record<string, string> = {
-	[CODEX_PROVIDER]: "no usage yet · r to fetch",
-	[NAN_PROVIDER]: "no usage yet · r to fetch",
-	[ANTHROPIC_PROVIDER]: "usage arrives with the first response",
-};
+// One entry per provider, and the whole list: this table is what the bar, the
+// panel and the refresh path read, so adding a provider is one entry here and
+// nothing else. `anthropic` carries no `fetchUsage` because its windows arrive
+// in the response headers of a normal turn, which no request of ours produces.
+export const USAGE_PROVIDERS: readonly UsageProviderAdapter[] = [
+	{ id: CODEX_PROVIDER, pendingNote: "no usage yet · r to fetch", fetchUsage: fetchCodexUsage },
+	{ id: ANTHROPIC_PROVIDER, pendingNote: "usage arrives with the first response" },
+	{ id: NAN_PROVIDER, pendingNote: "no usage yet · r to fetch", fetchUsage: fetchNanUsage },
+	{ id: OPENCODE_GO_PROVIDER, pendingNote: "no usage yet · r to fetch", fetchUsage: fetchOpenCodeGoUsage },
+];
+
+/** The ids the surfaces accept, derived from the table so the two cannot drift. */
+export const SUPPORTED_USAGE_PROVIDERS: readonly string[] = USAGE_PROVIDERS.map((provider) => provider.id);
+
+export function usageProvider(id: string | undefined): UsageProviderAdapter | undefined {
+	return USAGE_PROVIDERS.find((provider) => provider.id === id);
+}
 const UNSUPPORTED_NOTE = "no subscription usage for this provider";
 const ACTIVE_MARK = "✿";
 
@@ -130,7 +165,7 @@ export interface ActiveProvider {
 }
 
 export function providerNote(provider: string): string {
-	return PENDING_NOTE[provider] ?? UNSUPPORTED_NOTE;
+	return usageProvider(provider)?.pendingNote ?? UNSUPPORTED_NOTE;
 }
 
 export function windowLabel(seconds: number): string {
@@ -283,6 +318,123 @@ export function parseNanQuota(payload: unknown, now: number): ProviderUsage {
 		}
 	}
 	return { provider: NAN_PROVIDER, plan: undefined, limits, fetchedAt: now };
+}
+
+interface RawOpenCodeGoWindow {
+	percent?: number;
+	usage_percent?: number;
+	used_percent?: number;
+	resetsAt?: string;
+	resetAt?: string;
+	resets_in_seconds?: number;
+	resetsInSeconds?: number;
+}
+
+interface RawOpenCodeGoUsage {
+	usage?: Record<string, RawOpenCodeGoWindow>;
+	windows?: Record<string, RawOpenCodeGoWindow>;
+}
+
+// The endpoint reports whole percentages, so only a non-integer between 0 and 1 is
+// a fraction: `1` stays one percent instead of becoming 100%.
+function openCodeGoPercent(value: unknown): number | undefined {
+	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+	const percent = value > 0 && value < 1 ? value * 100 : value;
+	return Math.max(0, Math.min(100, Math.round(percent)));
+}
+
+function openCodeGoResetAt(window: RawOpenCodeGoWindow, now: number): number | null {
+	for (const key of ["resetsAt", "resetAt"] as const) {
+		const value = window[key];
+		if (typeof value !== "string") continue;
+		const parsed = Date.parse(value);
+		if (!Number.isNaN(parsed)) return parsed;
+	}
+	for (const key of ["resets_in_seconds", "resetsInSeconds"] as const) {
+		const value = window[key];
+		if (typeof value === "number" && Number.isFinite(value)) return now + value * 1000;
+	}
+	return null;
+}
+
+/** The Go plan reports a used percentage for each of its three windows. A window the
+ *  payload does not carry is simply absent, and a payload with none of them is not a
+ *  usage snapshot. */
+export function parseOpenCodeGoUsage(payload: unknown, now: number): ProviderUsage | undefined {
+	const raw = (payload ?? {}) as RawOpenCodeGoUsage;
+	const bag = raw.usage ?? raw.windows;
+	if (!bag || typeof bag !== "object") return undefined;
+	const windows: UsageWindow[] = [];
+	for (const [key, seconds] of OPENCODE_GO_WINDOWS) {
+		const window = bag[key];
+		if (!window || typeof window !== "object") continue;
+		const percent = openCodeGoPercent(window.percent ?? window.usage_percent ?? window.used_percent);
+		if (percent === undefined) continue;
+		windows.push({ label: windowLabel(seconds), usedPercent: percent, windowSeconds: seconds, resetAt: openCodeGoResetAt(window, now) });
+	}
+	if (windows.length === 0) return undefined;
+	return {
+		provider: OPENCODE_GO_PROVIDER,
+		plan: undefined,
+		limits: [{ name: OPENCODE_GO_LIMIT, windows, limitReached: windows.some((window) => window.usedPercent >= 100) }],
+		fetchedAt: now,
+	};
+}
+
+// The Codex usage endpoint is what the Codex CLI itself reads. The OAuth
+// token pi already holds carries the account id; nothing else is sent.
+export async function fetchCodexUsage(token: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined> {
+	if (!token) return undefined;
+	const accountId = accountIdFromToken(token);
+	if (!accountId) return undefined;
+	try {
+		const response = await fetchFn(CODEX_USAGE_URL, {
+			headers: { Authorization: `Bearer ${token}`, "chatgpt-account-id": accountId, originator: "pi", "User-Agent": "gentle-pi" },
+		});
+		if (!response.ok) return undefined;
+		return parseCodexUsage(await response.json(), now);
+	} catch {
+		return undefined;
+	}
+}
+
+// The NaN Cloud quota endpoint is the one the official dashboard reads with the
+// same API key pi already holds. The key travels in the header only: the request
+// refuses redirects so it cannot be replayed to another origin, asks for no
+// stored copy, and nothing here logs, renders, or persists it.
+export async function fetchNanUsage(apiKey: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined> {
+	if (!apiKey) return undefined;
+	try {
+		const response = await fetchFn(NAN_QUOTA_URL, {
+			redirect: "error",
+			cache: "no-store",
+			headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "User-Agent": "gentle-pi" },
+		});
+		if (!response.ok) return undefined;
+		const parsed = parseNanQuota(await response.json(), now);
+		return parsed.limits.length > 0 ? parsed : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+// The Go plan usage endpoint is the one the opencode dashboard reads with the same
+// API key its client already stores. The key travels in the header only: the request
+// refuses redirects so it cannot be replayed to another origin and asks for no
+// stored copy.
+export async function fetchOpenCodeGoUsage(apiKey: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined> {
+	if (!apiKey) return undefined;
+	try {
+		const response = await fetchFn(OPENCODE_GO_USAGE_URL, {
+			redirect: "error",
+			cache: "no-store",
+			headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "User-Agent": "gentle-pi" },
+		});
+		if (!response.ok) return undefined;
+		return parseOpenCodeGoUsage(await response.json(), now);
+	} catch {
+		return undefined;
+	}
 }
 
 // Aggregation. NaN reports one allowance per metered model and the payload

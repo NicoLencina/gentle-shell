@@ -3,17 +3,22 @@ import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
 	accountIdFromToken,
+	fetchOpenCodeGoUsage,
 	formatReset,
 	parseAnthropicHeaders,
 	parseCodexHeaders,
 	parseNanQuota,
+	parseOpenCodeGoUsage,
 	parseUsageHeaders,
 	parseCodexUsage,
 	providerNote,
 	renderUsageBar,
 	renderUsagePanel,
+	OPENCODE_GO_PROVIDER,
 	SUPPORTED_USAGE_PROVIDERS,
+	USAGE_PROVIDERS,
 	UsageStore,
+	usageProvider,
 	windowLabel,
 	type ProviderUsage,
 	type UsageWindow,
@@ -442,4 +447,112 @@ test("parseUsageHeaders picks whichever provider the headers belong to", () => {
 	assert.equal(parseUsageHeaders({ "x-codex-primary-used-percent": "10", "x-codex-primary-window-minutes": "300" }, NOW)?.provider, "openai-codex");
 	assert.equal(parseUsageHeaders({ "anthropic-ratelimit-unified-5h-utilization": "0.1" }, NOW)?.provider, "anthropic");
 	assert.equal(parseUsageHeaders({ "content-type": "application/json" }, NOW), undefined);
+});
+
+// opencode-go reports whole percentages (0–100) for its rolling 5h, weekly and
+// monthly windows, each with the instant it resets. `percent: 1` therefore means
+// one percent: a fraction fallback here would print 100%, which is what this
+// fixture guards against.
+const OPENCODE_GO_USAGE = {
+	usage: {
+		rolling: { status: "ok", percent: 6, resetsAt: "2026-09-20T20:19:35.848Z" },
+		weekly: { status: "ok", percent: 46, resetsAt: "2026-09-21T00:00:00.000Z" },
+		monthly: { status: "ok", percent: 33, resetsAt: "2026-10-05T22:37:36.000Z" },
+	},
+};
+
+test("parseOpenCodeGoUsage reads the three windows the Go plan reports", () => {
+	const parsed = parseOpenCodeGoUsage(OPENCODE_GO_USAGE, NOW);
+	assert.ok(parsed);
+	assert.equal(parsed.provider, OPENCODE_GO_PROVIDER);
+	const [limit] = parsed.limits;
+	assert.deepEqual(
+		limit.windows.map((window) => [window.label, window.usedPercent]),
+		[["5h", 6], ["week", 46], ["30d", 33]],
+	);
+	assert.equal(limit.windows[0].windowSeconds, 18_000);
+	assert.equal(limit.windows[0].resetAt, Date.parse("2026-09-20T20:19:35.848Z"));
+	assert.equal(limit.limitReached, false);
+});
+
+test("parseOpenCodeGoUsage keeps a whole percentage literal", () => {
+	const payload = { usage: { rolling: { percent: 1, resetsAt: "2026-09-20T20:19:35.848Z" } } };
+	const [window] = parseOpenCodeGoUsage(payload, NOW)!.limits[0].windows;
+	assert.equal(window.usedPercent, 1, "1 means one percent, not a fraction");
+});
+
+test("parseOpenCodeGoUsage accepts the sibling shape and second-based resets", () => {
+	const payload = { windows: { rolling: { usage_percent: 65, resets_in_seconds: 2_520 } } };
+	const [window] = parseOpenCodeGoUsage(payload, NOW)!.limits[0].windows;
+	assert.equal(window.usedPercent, 65);
+	assert.equal(window.resetAt, NOW + 2_520_000);
+});
+
+test("parseOpenCodeGoUsage returns nothing when no window is readable", () => {
+	assert.equal(parseOpenCodeGoUsage({}, NOW), undefined);
+	assert.equal(parseOpenCodeGoUsage({ usage: {} }, NOW), undefined);
+	assert.equal(parseOpenCodeGoUsage({ usage: { rolling: { percent: "6" } } }, NOW), undefined);
+});
+
+test("the Go plan is part of the supported providers", () => {
+	assert.ok(SUPPORTED_USAGE_PROVIDERS.includes(OPENCODE_GO_PROVIDER));
+});
+
+// The provider table is the one place a provider is added: the bar, the panel
+// and the refresh path read it, and the exported list is derived from it, so
+// the two can never drift.
+function fakeFetch(payload: unknown, ok = true) {
+	const calls: Array<{ url: string; headers: Record<string, string>; init: RequestInit }> = [];
+	const fetchFn = (async (url: string | URL, init?: RequestInit) => {
+		calls.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string>, init: init ?? {} });
+		return { ok, json: async () => payload } as Response;
+	}) as typeof fetch;
+	return { fetchFn, calls };
+}
+
+test("usageProvider returns the adapter for a known id and nothing for an unknown one", () => {
+	assert.equal(usageProvider(OPENCODE_GO_PROVIDER)?.id, OPENCODE_GO_PROVIDER);
+	assert.equal(usageProvider("anthropic")?.id, "anthropic");
+	assert.equal(usageProvider("not-a-provider"), undefined);
+	assert.equal(usageProvider(undefined), undefined);
+});
+
+test("SUPPORTED_USAGE_PROVIDERS is the table's ids and every note comes from its entry", () => {
+	assert.deepEqual(SUPPORTED_USAGE_PROVIDERS, USAGE_PROVIDERS.map((provider) => provider.id));
+	for (const provider of USAGE_PROVIDERS) {
+		assert.equal(providerNote(provider.id), provider.pendingNote);
+	}
+});
+
+test("only anthropic carries no fetchUsage because its windows arrive in headers", () => {
+	assert.equal(usageProvider("anthropic")?.fetchUsage, undefined);
+	assert.ok(usageProvider("openai-codex")?.fetchUsage);
+	assert.ok(usageProvider("nan")?.fetchUsage);
+	assert.ok(usageProvider("opencode-go")?.fetchUsage);
+});
+
+test("fetchOpenCodeGoUsage sends the key to the fixed origin and refuses redirects", async () => {
+	const { fetchFn, calls } = fakeFetch(OPENCODE_GO_USAGE);
+	const usage = await fetchOpenCodeGoUsage("sk-opencode-secret", fetchFn, NOW);
+	assert.equal(usage?.provider, OPENCODE_GO_PROVIDER);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].url, "https://opencode.ai/zen/go/v1/usage");
+	assert.equal(calls[0].headers.Authorization, "Bearer sk-opencode-secret");
+	assert.equal(calls[0].init.redirect, "error", "a redirect would forward the bearer to another origin");
+	assert.equal(calls[0].init.cache, "no-store");
+	assert.equal(JSON.stringify(usage).includes("sk-opencode-secret"), false);
+});
+
+test("fetchOpenCodeGoUsage degrades to no snapshot without ever throwing", async () => {
+	const noKey = fakeFetch(OPENCODE_GO_USAGE);
+	assert.equal(await fetchOpenCodeGoUsage(undefined, noKey.fetchFn, 0), undefined);
+	assert.equal(await fetchOpenCodeGoUsage("", noKey.fetchFn, 0), undefined);
+	assert.equal(noKey.calls.length, 0, "no key, no request");
+
+	assert.equal(await fetchOpenCodeGoUsage("sk-opencode-secret", fakeFetch(OPENCODE_GO_USAGE, false).fetchFn, 0), undefined, "a non-OK response is not a snapshot");
+	assert.equal(await fetchOpenCodeGoUsage("sk-opencode-secret", fakeFetch({ usage: {} }).fetchFn, 0), undefined, "a payload with no readable window is not a snapshot");
+	const refused = (async () => {
+		throw new TypeError("redirect mode is not supported");
+	}) as unknown as typeof fetch;
+	assert.equal(await fetchOpenCodeGoUsage("sk-opencode-secret", refused, 0), undefined, "a refused redirect degrades silently");
 });

@@ -24,7 +24,7 @@ import {
 	type DoubleEscCancelPolicy,
 	type DoubleEscCancelResolution,
 } from "../lib/double-esc-cancel-policy.ts";
-import { accountIdFromToken, CODEX_PROVIDER, CODEX_USAGE_URL, NAN_PROVIDER, NAN_QUOTA_URL, parseCodexUsage, parseNanQuota, parseUsageHeaders, UsageStore, type ProviderUsage } from "../lib/shell-usage.ts";
+import { parseUsageHeaders, UsageStore, usageProvider, type ProviderUsage } from "../lib/shell-usage.ts";
 import { UsageView } from "../lib/shell-usage-view.ts";
 import { sidebarHeader, sidebarPart } from "../lib/shell-sidebar.ts";
 import { installSidebar, invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
@@ -721,43 +721,6 @@ export function devBinaryCard(notice: DevBinaryNotice): Card {
 
 const USAGE_REFRESH_MS = 5 * 60_000;
 
-// The Codex usage endpoint is what the Codex CLI itself reads. The OAuth
-// token pi already holds carries the account id; nothing else is sent.
-export async function fetchCodexUsage(token: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined> {
-	if (!token) return undefined;
-	const accountId = accountIdFromToken(token);
-	if (!accountId) return undefined;
-	try {
-		const response = await fetchFn(CODEX_USAGE_URL, {
-			headers: { Authorization: `Bearer ${token}`, "chatgpt-account-id": accountId, originator: "pi", "User-Agent": "gentle-pi" },
-		});
-		if (!response.ok) return undefined;
-		return parseCodexUsage(await response.json(), now);
-	} catch {
-		return undefined;
-	}
-}
-
-// The NaN Cloud quota endpoint is the one the official dashboard reads with the
-// same API key pi already holds. The key travels in the header only: the request
-// refuses redirects so it cannot be replayed to another origin, asks for no
-// stored copy, and nothing here logs, renders, or persists it.
-export async function fetchNanUsage(apiKey: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined> {
-	if (!apiKey) return undefined;
-	try {
-		const response = await fetchFn(NAN_QUOTA_URL, {
-			redirect: "error",
-			cache: "no-store",
-			headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "User-Agent": "gentle-pi" },
-		});
-		if (!response.ok) return undefined;
-		const parsed = parseNanQuota(await response.json(), now);
-		return parsed.limits.length > 0 ? parsed : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
 export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env, overrides: Partial<ShellDeps> = {}): void {
 	installSessionChangeCapture(pi, env, overrides.resolveWorktree ?? resolveSessionWorktree);
 	if (!shellEnabled(env)) return;
@@ -768,13 +731,14 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	// next one waiting for an interval it never used.
 	const usageFetchedAt = new Map<string, number>();
 	const refreshUsage = async (ctx: ExtensionContext, force: boolean) => {
-		const provider = ctx.model?.provider;
-		if (provider !== CODEX_PROVIDER && provider !== NAN_PROVIDER) return;
+		const adapter = usageProvider(ctx.model?.provider);
+		if (!adapter?.fetchUsage) return;
+		const provider = adapter.id;
 		const now = deps.now();
 		if (!force && now - (usageFetchedAt.get(provider) ?? 0) < USAGE_REFRESH_MS) return;
 		usageFetchedAt.set(provider, now);
 		const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider).catch(() => undefined);
-		const fetched = provider === NAN_PROVIDER ? await fetchNanUsage(apiKey, deps.fetch, deps.now()) : await fetchCodexUsage(apiKey, deps.fetch, deps.now());
+		const fetched = await adapter.fetchUsage(apiKey, deps.fetch, deps.now());
 		if (!fetched) return;
 		usage.record(fetched);
 		renderHost?.invalidateSidebar?.();
