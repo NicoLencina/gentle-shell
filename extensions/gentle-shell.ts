@@ -24,6 +24,7 @@ import {
 	type DoubleEscCancelPolicy,
 	type DoubleEscCancelResolution,
 } from "../lib/double-esc-cancel-policy.ts";
+import { resolveUsagePolicy, writeUsagePolicy, type UsagePolicy, type UsageResolution } from "../lib/usage-policy.ts";
 import { parseUsageHeaders, UsageStore, usageProvider, type ProviderUsage } from "../lib/shell-usage.ts";
 import { UsageView } from "../lib/shell-usage-view.ts";
 import { sidebarHeader, sidebarPart } from "../lib/shell-sidebar.ts";
@@ -497,6 +498,37 @@ function renderDoubleEscCancelReport(
 	return { message: lines.join("\n"), type: resolution.malformed ? "warning" : "info" };
 }
 
+function describeUsageSource(resolution: UsageResolution): string {
+	switch (resolution.source) {
+		case "global_file":
+			return `global file ${resolution.globalFile}`;
+		case "environment":
+			return "GENTLE_PI_USAGE";
+		default:
+			return "built-in default";
+	}
+}
+
+/** Report the effective usage-window policy, its deciding source, and (when
+ *  this invocation just wrote one) the policy it wrote. Same shape as the
+ *  double-esc-cancel report, with the default inverted. */
+function renderUsageReport(resolution: UsageResolution, wrote?: UsagePolicy): { message: string; type: "info" | "warning" } {
+	const lines = [`usage window: ${resolution.policy} (decided by ${describeUsageSource(resolution)})`];
+	if (wrote !== undefined) lines.push(`Wrote ${wrote} to the global file ${resolution.globalFile}.`);
+	if (resolution.malformed) {
+		lines.push(`${resolution.globalFile} is present but malformed, so the policy fails closed to off and the environment variable is not consulted.`);
+	}
+	if (resolution.envValue !== undefined && resolution.source !== "environment") {
+		lines.push(
+			resolution.envValue === "on" || resolution.envValue === "off"
+				? `GENTLE_PI_USAGE=${resolution.envValue} is set, but the global file exists and decides; the env var applies only when no file exists.`
+				: `GENTLE_PI_USAGE="${resolution.envValue}" is not a recognized value ("on" or "off"), so it is ignored.`,
+		);
+	}
+	lines.push("Resolution order (first hit wins): global file, GENTLE_PI_USAGE, built-in default on.");
+	return { message: lines.join("\n"), type: resolution.malformed ? "warning" : "info" };
+}
+
 const CHANGES_WIDGET_KEY = "gentle-shell-changes";
 const CHANGES_COMMAND_NAME = "gentle:changes";
 const CHANGES_SHORTCUT_DEFAULT = "alt+g";
@@ -725,12 +757,23 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	installSessionChangeCapture(pi, env, overrides.resolveWorktree ?? resolveSessionWorktree);
 	if (!shellEnabled(env)) return;
 	const deps: ShellDeps = { ...defaultShellDeps, activeProfile: createActiveProfileReader(env), ...overrides };
+	// The config home is shared with the double-esc-cancel policy below: both
+	// preferences live at the same global root, and two spellings of the same
+	// override would read two different stores. The usage policy is resolved
+	// once at startup and re-resolved on every command invocation and panel
+	// open, so a write or an external edit takes effect at the next read.
+	const doubleEscCancelConfigHome = gentlePiConfigHome(env);
+	let usagePolicy: UsagePolicy = resolveUsagePolicy({ env, gentlePiConfigHome: doubleEscCancelConfigHome }).policy;
 	const usage = new UsageStore();
 	let renderHost: ShellRenderHost | undefined;
 	// The 5-minute rule is per provider: one provider's fetch cannot leave the
 	// next one waiting for an interval it never used.
 	const usageFetchedAt = new Map<string, number>();
 	const refreshUsage = async (ctx: ExtensionContext, force: boolean) => {
+		// Off means nothing is fetched at all: not on session start, not on the
+		// shortcut, not on a refresh. The 5-minute rule only ever sees requests
+		// the window is actually on for.
+		if (usagePolicy === "off") return;
 		const adapter = usageProvider(ctx.model?.provider);
 		if (!adapter?.fetchUsage) return;
 		const provider = adapter.id;
@@ -757,6 +800,14 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		return cardComponent({ title: "Gentle AI", subtitle: "review preflight", body, tone: CARD_TONE.INFO }, theme, { expanded: options.expanded, hint });
 	});
 	const openUsage = async (ctx: ExtensionContext) => {
+		// Re-resolve on every open so a write or an external edit is honored
+		// without a reload, exactly as the command below re-syncs its own copy.
+		const resolution = resolveUsagePolicy({ env, gentlePiConfigHome: doubleEscCancelConfigHome });
+		usagePolicy = resolution.policy;
+		if (resolution.policy === "off") {
+			ctx.ui.notify("The usage window is off. Turn it back on with /gentle:usage on.", "info");
+			return;
+		}
 		await refreshUsage(ctx, true);
 		await ctx.ui.custom<null>(
 			(tui, theme, _keybindings, done) =>
@@ -772,8 +823,38 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		);
 	};
 	pi.registerCommand(USAGE_COMMAND_NAME, {
-		description: "Show subscription usage windows for the connected providers. Press r to refetch.",
-		handler: async (_args, ctx) => openUsage(ctx),
+		description: "Show subscription usage windows for the connected providers (on|off|status), or open the panel. Press r to refetch.",
+		handler: async (args, ctx) => {
+			const trimmed = args.trim();
+			if (trimmed !== "" && trimmed !== "status" && trimmed !== "on" && trimmed !== "off") {
+				ctx.ui.notify(`Unknown /${USAGE_COMMAND_NAME} sub-action "${trimmed}". Use on, off, or status.`, "warning");
+				return;
+			}
+			try {
+				const before = resolveUsagePolicy({ env, gentlePiConfigHome: doubleEscCancelConfigHome });
+				usagePolicy = before.policy;
+				if (trimmed === "") {
+					await openUsage(ctx);
+					return;
+				}
+				if (trimmed === "status") {
+					const report = renderUsageReport(before);
+					ctx.ui.notify(report.message, report.type);
+					return;
+				}
+				const wrote: UsagePolicy = trimmed;
+				writeUsagePolicy(wrote, { gentlePiConfigHome: doubleEscCancelConfigHome });
+				const after = resolveUsagePolicy({ env, gentlePiConfigHome: doubleEscCancelConfigHome });
+				// Cache what the file actually resolves to, not what was written: a
+				// competing writer or a read failure would otherwise leave the fetch
+				// gate and the report disagreeing.
+				usagePolicy = after.policy;
+				const report = renderUsageReport(after, wrote);
+				ctx.ui.notify(report.message, report.type);
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
 	});
 	const usageShortcutKey = usageShortcut(env);
 	if (usageShortcutKey) {
@@ -796,7 +877,6 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	// re-syncs this cache from disk first, so status, the no-argument toggle
 	// direction, and the Esc gate always describe the same effective policy
 	// even when another session or a hand edit changed the file mid-session.
-	const doubleEscCancelConfigHome = gentlePiConfigHome(env);
 	const animationOptions = { gentlePiConfigHome: doubleEscCancelConfigHome };
 	let animationPolicy = resolveAnimationPolicy(animationOptions).policy;
 	let doubleEscCancelPolicy: DoubleEscCancelPolicy = resolveDoubleEscCancelPolicy({
@@ -850,13 +930,16 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		const tracker = changes;
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			renderHost = { requestRender: () => tui.requestRender(), invalidateSidebar: () => invalidateSidebar(tui) };
-			const bottom = createShellBarComponent(pi, ctx, renderHost, theme, footerData, () => tracker.model.files.length, () => usage.get(ctx.model?.provider ?? ""));
+			// While the window is off the store may still hold a snapshot from
+			// before the switch; the surfaces must not draw it either way.
+			const currentUsage = () => (usagePolicy === "on" ? usage.get(ctx.model?.provider ?? "") : undefined);
+			const bottom = createShellBarComponent(pi, ctx, renderHost, theme, footerData, () => tracker.model.files.length, currentUsage);
 			// The Status card paints live session state that no event re-registers a
 			// part for: model, effort, context, cost, session name and extension
 			// statuses. The digest is what keeps the fullscreen memo honest, and it
 			// rebuilds the model exactly as the narrow bottom bar does every frame.
 			const footerModel = (): ShellBarModel => ({
-				...buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: usage.get(ctx.model?.provider ?? ""), profile: deps.activeProfile() }),
+				...buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: currentUsage(), profile: deps.activeProfile() }),
 				changes: { files: tracker.model.files.length, added: tracker.model.added, deleted: tracker.model.deleted, notice: tracker.model.notice },
 			});
 			const part = sidebarPart(tui, "footer", bottom, {
@@ -866,10 +949,12 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			});
 			// The header row carries everything that ticks every frame (model,
 			// effort, context, cost, usage) plus session identity; it never sees
-			// extension statuses or the working/thinking state.
-			const headerBar = (width: number) => renderShellHeaderBar(buildShellHeaderModel(footerModel()), theme, width, usageShortcutKey);
+			// extension statuses or the working/thinking state. The switch rides
+			// on the model so the digest repaints when it flips.
+			const headerModel = () => ({ ...buildShellHeaderModel(footerModel()), usageEnabled: usagePolicy === "on" });
+			const headerBar = (width: number) => renderShellHeaderBar(headerModel(), theme, width, usageShortcutKey);
 			const disposeHeader = sidebarHeader(tui, {
-				digest: () => JSON.stringify(buildShellHeaderModel(footerModel())),
+				digest: () => JSON.stringify(headerModel()),
 				render: (width) => [headerBar(width).text, renderShellHeaderRule(theme, width)],
 				invalidate() {},
 				handleMouse(event) {

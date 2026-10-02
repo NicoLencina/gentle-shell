@@ -429,6 +429,24 @@ test("renderShellHeaderBar's usage span always points at the usage text, not ctx
 	}
 });
 
+test("renderShellHeaderBar draws no usage segment and reports no span when usageEnabled is false", () => {
+	const header = { ...buildShellHeaderModel(model({ usage: USAGE_TWO_WINDOWS })), usageEnabled: false };
+	const { text, usageSpan } = renderShellHeaderBar(header, plainTheme, 140, "alt+u");
+	assert.doesNotMatch(text, /usage/, "the switch removes the standing affordance entirely");
+	assert.equal(usageSpan, undefined, "no span means the header reports no click target");
+	assert.match(text, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub$/, "context and cost still render");
+	assert.equal(visibleWidth(text), 140);
+});
+
+test("renderShellHeaderBar keeps today's standing usage segment when usageEnabled is true or omitted", () => {
+	for (const usageEnabled of [true, undefined]) {
+		const header = { ...buildShellHeaderModel(model()), usageEnabled };
+		const { text, usageSpan } = renderShellHeaderBar(header, plainTheme, 140, "alt+u");
+		assert.match(text, /usage · alt\+u$/);
+		assert.ok(usageSpan, "the enabled header still reports the click span");
+	}
+});
+
 test("renderShellHeaderRule paints one full-width line in the editor frame color", () => {
 	assert.equal(renderShellHeaderRule(taggedTheme, 4), "<border>────</border>", "the rule uses the editor frame's border role");
 	assert.equal(renderShellHeaderRule(plainTheme, 12), "─".repeat(12), "the rule spans the full width");

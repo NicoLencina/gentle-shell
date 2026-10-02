@@ -46,6 +46,11 @@ export interface ShellHeaderModel {
 	// cost. Unlike the sidebar's old per-model usage table, this is one
 	// compact line — the same windows the compact bar already meters.
 	usage: ProviderUsage | undefined;
+	// Whether the usage window is on at all. `false` drops the segment (and
+	// its click span) entirely — nothing to report, and nothing to click into.
+	// Omitted behaves as `true`, so every caller that predates the switch is
+	// unchanged.
+	usageEnabled?: boolean;
 }
 
 export function buildShellHeaderModel(model: ShellBarModel): ShellHeaderModel {
@@ -275,6 +280,7 @@ export function renderShellHeaderBar(model: ShellHeaderModel, theme: ShellBarThe
 	const targetWidth = Math.max(0, Math.floor(width));
 	const ctxCost = joinSegments([contextSegment(model.contextPercent, theme), costSegment(model.costTotal, model.subscription, theme)], theme);
 	const windows = model.usage ? (selectUsageLimit(model.usage, model.modelId)?.windows ?? []) : [];
+	const usageEnabled = model.usageEnabled !== false;
 	const leftStages = headerLeftStages(model, theme);
 	const minimalLeft = leftStages.length - 2; // brand + bare model id, before dropping the model too
 	// One flat, ordered cascade — never a per-stage nested search — so the
@@ -286,11 +292,15 @@ export function renderShellHeaderBar(model: ShellHeaderModel, theme: ShellBarThe
 	// standing, clickable affordance — even with nothing to report it still
 	// reads "usage" plus the shortcut hint, unless disabled, width permitting.
 	const usageStages: Array<UsageStage | undefined> = ["full", "text", "primary", undefined];
-	const attempts: Array<{ leftIndex: number; usageStage: UsageStage | undefined }> = [
-		...leftStages.slice(0, minimalLeft).map((_, leftIndex) => ({ leftIndex, usageStage: "full" as UsageStage })),
-		...usageStages.map((usageStage) => ({ leftIndex: minimalLeft, usageStage })),
-		{ leftIndex: leftStages.length - 1, usageStage: undefined },
-	];
+	// With the switch off there is no segment to lose, so the whole cascade
+	// is the left group giving way, widest first.
+	const attempts: Array<{ leftIndex: number; usageStage: UsageStage | undefined }> = usageEnabled
+		? [
+			...leftStages.slice(0, minimalLeft).map((_, leftIndex) => ({ leftIndex, usageStage: "full" as UsageStage })),
+			...usageStages.map((usageStage) => ({ leftIndex: minimalLeft, usageStage })),
+			{ leftIndex: leftStages.length - 1, usageStage: undefined },
+		]
+		: leftStages.map((_, leftIndex) => ({ leftIndex, usageStage: undefined }));
 	for (const { leftIndex, usageStage } of attempts) {
 		const usageText = usageStage ? usageSegmentText(windows, theme, usageStage, usageHint) : undefined;
 		const right = usageText ? joinSegments([ctxCost, usageText], theme) : ctxCost;
