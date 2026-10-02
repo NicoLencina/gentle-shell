@@ -825,6 +825,7 @@ One limitation is worth stating. When a pinned profile omits an agent, that agen
 | `/gentle:persona`                | Switches global persona mode, with project override support.        |
 | `/gentle:background-subagents`   | Shows or sets the managed background-subagents policy (`status\|enable\|disable`), naming the source that decided it. |
 | `/gentle:double-esc-cancel`      | Shows or sets the double-esc-cancel preference (`status\|enable\|disable`); no argument toggles it. |
+| `/gentle:usage`                  | Opens the subscription usage panel; `on\|off\|status` turns the usage window on or off and reports the deciding source. |
 | `/gentle:animations`            | Shows or sets global animations (`status\|quality\|performance\|potato`); no argument reports status. |
 | `/gentle:telemetry`              | Shows or changes the local Gentle AI telemetry trigger (`status\|enable\|disable\|preview`).  |
 | `/gentle:review-mode`            | Shows or sets the receipt-driven development mode (`status\|enable\|disable`); user-initiated only, Pi automation never toggles it. |
@@ -900,6 +901,27 @@ Three sources can decide the policy, and the first hit wins:
 | 3        | Built-in default                            | `off`.                                                        |
 
 The file uses the strict shape `{"schema":"gentle-pi.double-esc-cancel/v1","policy":"on"}`. A file that is present but malformed fails closed to `off` instead of falling through to the environment variable, and the command reports that case as a warning instead of an ordinary `off`. The extension resolves the policy once at startup and updates it in memory when the command runs; the prompt never re-reads the file on every keypress.
+
+### Usage window policy
+
+The subscription usage window (the bar segment, the fullscreen header segment and the `/gentle:usage` panel) reports whichever provider the session runs on. Every supported provider is one entry in the single `USAGE_PROVIDERS` table in `lib/shell-usage.ts`, and the ids, the pending notes and the refresh path are all derived from it, so adding a provider is one reviewed entry there with no per-provider branching anywhere else; an entry without a `fetchUsage` is one whose windows only arrive in response headers (Anthropic). The endpoint URL is fixed in the entry, so a stored key can only ever be sent to an origin named in that repository file.
+
+```text
+/gentle:usage           Open the subscriptions panel.
+/gentle:usage status    Report the effective policy and the deciding source.
+/gentle:usage off       Write "off" to the global file.
+/gentle:usage on        Write "on" to the global file.
+```
+
+The window is on by default. Three sources can decide the policy, and the first hit wins:
+
+| Priority | Source                          | Notes                                                        |
+| -------- | ------------------------------- | ------------------------------------------------------------ |
+| 1        | `<configHome>/usage.json`       | Global file, written by `on`/`off`. `configHome` honors `GENTLE_PI_CONFIG_HOME` and defaults to `~/.pi/gentle-ai`. There is no project-level override: the switch decides whether anything is fetched at all. |
+| 2        | `GENTLE_PI_USAGE`               | Exactly `on` or `off`. Any other value is ignored, and it decides only when the global file does not exist. |
+| 3        | Built-in default                | `on`.                                                        |
+
+The file uses the strict shape `{"schema":"gentle-pi.usage/v1","policy":"on"}`. A file that is present but malformed fails closed to `off` instead of falling through to the environment variable, and the command reports that case as a warning instead of an ordinary `off`. While the window is off no usage request is issued (not on session start, the shortcut, `agent_end`, or the panel's `r`) and no usage segment is drawn in the bar or the header; `/gentle:usage` reports the state and the command that turns it back on instead of opening the panel.
 
 ### Animation modes
 

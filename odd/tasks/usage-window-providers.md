@@ -56,17 +56,17 @@ ternary picking its fetcher. A user whose provider is not in that list gets
 
 ## Tasks
 
-- [ ] WU-1 — One table: move the three fetchers into `lib/shell-usage.ts`, describe each
+- [x] WU-1 — One table: move the three fetchers into `lib/shell-usage.ts`, describe each
       provider with `{ id, pendingNote, fetchUsage? }`, derive `SUPPORTED_USAGE_PROVIDERS`
       and `providerNote` from it, and drive the refresh path from `usageProvider(id)`.
       `opencode-go` becomes an entry. Codex and Anthropic keep their exact behavior; the
       Anthropic entry carries no `fetchUsage` because its windows arrive in response headers.
-- [ ] WU-2 — The switch: `lib/usage-policy.ts` mirroring `lib/double-esc-cancel-policy.ts`
+- [x] WU-2 — The switch: `lib/usage-policy.ts` mirroring `lib/double-esc-cancel-policy.ts`
       (global file `<configHome>/usage.json` with schema `gentle-pi.usage/v1`, env
       `GENTLE_PI_USAGE`, default `on`), `/gentle:usage on|off|status` with no argument still
       opening the panel, no fetch while it is off, and no usage segment in the bar or the
       header while it is off.
-- [ ] WU-3 — Document the registry (how to add a provider) and the switch, and record the
+- [x] WU-3 — Document the registry (how to add a provider) and the switch, and record the
       evidence.
 
 ## Acceptance criteria
@@ -93,8 +93,46 @@ ternary picking its fetcher. A user whose provider is not in that list gets
 
 - Baseline before WU-1, with the uncommitted opencode-go work in the tree:
   `node --experimental-strip-types --test tests/shell-usage.test.ts` — 31 passed, 0 failed.
+- WU-1 landed as commit `31630c59` on `feat/usage-window-providers` (one commit ahead of
+  `origin/main`): the single `USAGE_PROVIDERS` table drives `SUPPORTED_USAGE_PROVIDERS`,
+  `providerNote(id)` and `usageProvider(id)`, with `opencode-go` as one entry and Anthropic
+  carrying no `fetchUsage`.
+- WU-2 wiring landed as the uncommitted working-tree changes to
+  `lib/usage-policy.ts`, `lib/shell-bar.ts` and `extensions/gentle-shell.ts`, with their
+  tests in `tests/usage-policy.test.ts`, `tests/shell-bar.test.ts` and
+  `tests/gentle-shell.test.ts`.
+- WU-3 documentation landed in `docs/gentle-shell.md` ("Adding a provider", "Turning the
+  window off", both screenshots under `docs/assets/features/`) and `docs/readme-reference.md`
+  ("Usage window policy" and the `/gentle:usage` command-table row).
+- Focused suites, all green:
+  - `node --experimental-strip-types --test tests/usage-policy.test.ts` — 14 pass, 0 fail.
+  - `node --experimental-strip-types --test tests/gentle-shell.test.ts` — 100 pass, 0 fail.
+  - `node --experimental-strip-types --test tests/shell-bar.test.ts` — 35 pass, 0 fail.
+  - `node --experimental-strip-types --test tests/shell-usage.test.ts` — 36 pass, 0 fail.
+- `pnpm typecheck` — passes; `types: 196 recorded diagnostic(s), no regressions; 3 file/code
+  pair(s) improved`.
+- `pnpm test` (full suite, run in full) — 2985 tests, 2937 pass, 47 skipped, 1 fail. The one
+  failure is `tests/review-host-relay-routing.test.ts:282` ("a missing review-refuter routing
+  model is refused typed...", `failure.kind` is `undefined` instead of
+  `reviewer-config-invalid`). It is pre-existing and unrelated: the file and every module it
+  imports (`extensions/gentle-ai.ts`, `lib/review-host-relay.ts`, `lib/review-integration-v2.ts`,
+  `lib/native-review-cli.ts`) are byte-identical to `origin/main` (`git diff origin/main HEAD --
+  <those files>` is empty), this branch never imports `gentle-shell.ts` from `gentle-ai.ts`, and
+  the failure reproduces in isolation with `GENTLE_PI_CONFIG_HOME`, `GENTLE_PI_REVIEW_RELAY_CONTRACT`
+  unset and `HOME` overridden. It was not introduced or touched by this change and it is outside
+  the authorized edit surfaces.
+
+## Limits
+
+- The `opencode-go` source contract was verified against a live Go subscription key on
+  2026-09-20; it is not covered by an automated live integration test. The `percent` shape that
+  treats whole numbers 0–100 (not fractions) is pinned by unit tests over the documented
+  payload, not by a network call.
+- The full suite is not green on this base because of the unrelated
+  `tests/review-host-relay-routing.test.ts:282` failure described above; that test is outside
+  the authorized edit surfaces and was left untouched.
 
 ## Next step
 
-WU-1. The design is fixed above; the writer works from this document and the existing
-`lib/double-esc-cancel-policy.ts` as the shape to mirror in WU-2.
+WU-1, WU-2 and WU-3 are complete. The parent owns the commit and the pull request; no
+remaining implementation work is required for this task.

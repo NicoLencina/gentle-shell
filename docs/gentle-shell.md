@@ -101,7 +101,11 @@ The separate `session_worktree_register` tool still registers canonical same-clo
 
 To use `ctrl+p` like OpenCode, rebind Pi's `app.model.cycleForward` in `~/.pi/agent/keybindings.json` (Pi reserves that action, so an extension cannot take `ctrl+p` while it holds it) and set `GENTLE_PI_COMMANDS_KEY=ctrl+p`.
 
-Subscription usage shows in the bar after the cost, and `/gentle:usage` opens a panel with one row per window of every provider: the limit name, its meter, its percentage and, when that window reports one, its reset, all on one line. Codex, Claude and NaN all read the same way. In fullscreen mode, clicking the header's `usage` segment opens this same panel. The panel's own footer hints (`r refresh`, `esc close`) are clickable too, not just keyboard shortcuts, and hovering either one paints it in the shell's shared hover role while a refresh already in flight ignores a repeated click.
+Subscription usage shows in the bar after the cost, and `/gentle:usage` opens a panel with one row per window of every provider: the limit name, its meter, its percentage and, when that window reports one, its reset, all on one line. Codex, Claude, NaN and any other provider in the registry read the same way. In fullscreen mode, clicking the header's `usage` segment opens this same panel. The panel's own footer hints (`r refresh`, `esc close`) are clickable too, not just keyboard shortcuts, and hovering either one paints it in the shell's shared hover role while a refresh already in flight ignores a repeated click.
+
+![The collapsed usage window: the provider and its windows on one line in the bar](assets/features/usage-window-collapsed.png)
+
+![The expanded usage window: one meter per window with its percentage and reset](assets/features/usage-window-expanded.png)
 
 ```text
 ✿ gentle shell ⟡ … ⟡ $9.49 sub ⟡ codex 5h ▰▰▰▰▰▱▱▱ 62% · week 31%
@@ -122,6 +126,39 @@ The panel rows a provider reports its windows with:
 - A provider with per-model allowances is ordered by family on both surfaces: a family stays together, the family that consumes most comes first, and the models inside it follow the same rule, most used first. There are no `total` rows anywhere — an aggregate nobody can act on only costs space — so the account and family totals survive only as the bar's fallback name when the session model holds no allowance of its own (`nan total`). An allowance row leaves the window label empty and prints `name meter percent`, while a labeled sub-window (`4h`) keeps its column, and the reset a window reports rides that same line after a `·`; a window without one ends at its percentage, never on a dangling separator. The sidebar's Usage group prints those same rows in that same order, so the breakdown does not require opening the panel, and stops at the percentage: the reset dates stay in the panel. A row whose windows all round to `0%` is dropped from that group — an allowance nobody has touched yet tells the reader nothing the missing row does not — and the same rule retires the aggregate line of a provider without raw allowances once every window it shows sits at `0%`; the bar and the panel keep printing it, so a zeroed subscription is still verifiable there.
 - Only the plan name and the windows are kept; account details in the payload are discarded.
 - Gauges turn amber at 80% and red at 95%, like the context gauge.
+
+### Adding a provider
+
+Every provider the window knows about is one entry in the single `USAGE_PROVIDERS` table in [`lib/shell-usage.ts`](../lib/shell-usage.ts). `SUPPORTED_USAGE_PROVIDERS`, `providerNote(id)` and `usageProvider(id)` are all derived from it, so nothing else in the codebase branches per provider — there is no second list to update and no `if (provider === ...)` to add. An entry is `{ id, pendingNote, fetchUsage? }`:
+
+- `id` is the provider id exactly as Pi reports it in `ctx.model.provider` (for example `opencode-go`).
+- `pendingNote` is what the bar and the panel say while there is no snapshot yet.
+- `fetchUsage(apiKey, fetch, now)` reads that provider's own endpoint into the shared model. It is omitted only when the provider's windows arrive in the response headers of a normal turn (`anthropic`), which needs no request of ours.
+
+The endpoint URL is fixed inside the entry, so no user-supplied URL ever reaches it: a stored key can only be sent to an origin named in this repository. A fetch refuses redirects, asks for no stored copy, sends the key in a header only, keeps no cached copy, and degrades to no data without throwing on a malformed payload. Refresh stays throttled to at most once every 5 minutes per provider, plus session start and the panel's `r`.
+
+### Turning the window off
+
+`/gentle:usage` with no argument opens the panel; the sub-actions turn the whole window off and back on:
+
+```text
+/gentle:usage           Open the subscriptions panel.
+/gentle:usage status    Report the effective policy and the deciding source.
+/gentle:usage off       Write "off" to the global file.
+/gentle:usage on        Write "on" to the global file.
+```
+
+While it is off, no usage request is issued at all — not on session start, not on the `alt+u` shortcut, not on `agent_end`, not on the panel's `r` — and no usage segment is drawn in the compact bar or the fullscreen header, so there is nothing to click into. `/gentle:usage` then reports the state and the command that turns it back on instead of opening the panel. The switch changes only whether the window exists: the fetch, throttling and the panel are otherwise untouched.
+
+The policy is global-only and on by default. `configHome` honors `GENTLE_PI_CONFIG_HOME` and defaults to `~/.pi/gentle-ai`:
+
+| Priority | Source                                | Notes                                                        |
+| -------- | ------------------------------------- | ------------------------------------------------------------ |
+| 1        | `<configHome>/usage.json`             | Global file, written by `on`/`off`.                          |
+| 2        | `GENTLE_PI_USAGE`                     | Exactly `on` or `off`. Any other value is ignored, and it decides only when the global file does not exist. |
+| 3        | Built-in default                      | `on`.                                                        |
+
+The file uses the strict shape `{"schema":"gentle-pi.usage/v1","policy":"on"}`. A file that is present but malformed fails closed to `off` instead of falling through to the environment variable, and the command reports that case as a warning instead of an ordinary `off`.
 
 Gentle notices are drawn as cards: the same rounded frame as the prompt. An informational card paints the rounded frame in the theme's plain border role and its title in the accent role — the rose look every sidebar card, the review preflight reminder, and a quiet Agents card share. A warning, error, or success card paints its frame and title in its own tone color instead.
 
