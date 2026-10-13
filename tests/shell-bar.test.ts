@@ -284,6 +284,17 @@ test("renderShellBar keeps its own zero-window contract independent of the sideb
 	assert.match(renderShellBar(model({ usage }), plainTheme, 200)[0], /codex 5h ▱▱▱▱▱▱▱▱ 0% · week 0%$/);
 });
 
+test("renderShellBar drops the usage meter when the window is off, even with a snapshot in hand", () => {
+	const usage = {
+		provider: "openai-codex",
+		plan: "pro",
+		fetchedAt: 0,
+		limits: [{ name: "codex", limitReached: false, windows: [{ label: "5h", usedPercent: 62, windowSeconds: 18_000, resetAt: null }] }],
+	};
+	assert.match(renderShellBar(model({ usage }), plainTheme, 200)[0], /codex 5h /, "the control draws the meter while the window is on");
+	assert.doesNotMatch(renderShellBar(model({ usage, usageEnabled: false }), plainTheme, 200)[0], /codex 5h /);
+});
+
 test("renderShellBar shows an unknown context as a question mark after compaction", () => {
 	const [line] = renderShellBar(model({ contextPercent: null }), plainTheme, 160);
 	assert.match(line, /ctx ▱▱▱▱▱▱▱▱ \?%/);
@@ -486,6 +497,17 @@ test("renderShellHeaderBar drops the profile, then the effort, then the whole lo
 	assert.match(noUsage, /✿ Gentle Shell/);
 	assert.match(noUsage, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub$/);
 	assert.equal(visibleWidth(noUsage), 60);
+});
+
+test("renderShellHeaderBar drops the standing usage segment and its click target when the window is off", () => {
+	assert.equal(buildShellHeaderModel(model({ usageEnabled: false })).usageEnabled, false, "the header model carries the window's state");
+	const header = buildShellHeaderModel(model({}));
+	const on = renderShellHeaderBar(header, plainTheme, 120);
+	assert.match(on.text, /⟡ usage$/);
+	assert.ok(on.usageSpan, "the standing segment is clickable while the window is on");
+	const off = renderShellHeaderBar({ ...header, usageEnabled: false }, plainTheme, 120);
+	assert.doesNotMatch(off.text, /usage/);
+	assert.equal(off.usageSpan, undefined, "nothing to click when the window is off");
 });
 
 test("renderShellHeaderBar returns an empty string only once the brand itself cannot fit", () => {

@@ -34,6 +34,10 @@ export interface ShellBarModel {
 	costTotal: number;
 	subscription: boolean;
 	usage: ProviderUsage | undefined;
+	// Whether the usage window is on at all. `false` drops the segment (and
+	// its meter) from both the compact bar and the fullscreen header, so the
+	// switch removes the affordance, not just the data.
+	usageEnabled?: boolean;
 	statuses: string[];
 }
 
@@ -55,11 +59,15 @@ export interface ShellHeaderModel {
 	// cost. Unlike the sidebar's old per-model usage table, this is one
 	// compact line — the same windows the compact bar already meters.
 	usage: ProviderUsage | undefined;
+	// The window's on/off state; `false` drops the segment (and its click
+	// target) even while a snapshot is in hand.
+	usageEnabled?: boolean;
 }
 
 export function buildShellHeaderModel(model: ShellBarModel, showJobs = false): ShellHeaderModel {
-	const { cwd, branch, dirty, modelId, effort, profile, contextPercent, costTotal, subscription, usage } = model;
+	const { cwd, branch, dirty, modelId, effort, profile, contextPercent, costTotal, subscription, usage, usageEnabled } = model;
 	return { cwd, branch, dirty, modelId, effort, profile, contextPercent, costTotal, subscription, usage,
+		...(usageEnabled !== undefined ? { usageEnabled } : {}),
 		...(showJobs && model.jobs?.length ? { jobs: model.jobs.length } : {}) };
 }
 
@@ -173,7 +181,7 @@ function buildSegments(model: ShellBarModel, theme: ShellBarTheme, presentation?
 	const modelSegment = executionSegment(model.modelId, model.effort, theme);
 	const context = contextSegment(model.contextPercent, theme);
 	const cost = costSegment(model.costTotal, model.subscription, theme);
-	const usage = model.usage ? renderUsageBar(model.usage, theme, model.modelId) : undefined;
+	const usage = model.usage && model.usageEnabled !== false ? renderUsageBar(model.usage, theme, model.modelId) : undefined;
 	const statuses = model.statuses.map((status) => theme.fg(ROLE.STATUS, sanitizeStatus(status)));
 	return [
 		...(presentation?.density === "minimal" ? [] : [theme.fg(ROLE.BRAND, SHELL_BAR_BRAND)]),
@@ -396,7 +404,7 @@ function headerContent(model: ShellHeaderModel, theme: ShellBarTheme, width: num
 	// Unlike the compact bar's usage meter (hidden with no data), this is a
 	// standing, clickable affordance — even with nothing to report it still
 	// reads "usage" plus the shortcut hint, unless disabled, width permitting.
-	const usageStages: Array<UsageStage | undefined> = presentation?.visibility.usageCost === false ? [undefined] : ["full", "text", "primary", undefined];
+	const usageStages: Array<UsageStage | undefined> = model.usageEnabled === false || presentation?.visibility.usageCost === false ? [undefined] : ["full", "text", "primary", undefined];
 	const attempts: Array<{ leftIndex: number; usageStage: UsageStage | undefined }> = [
 		...leftStages.slice(0, minimalLeft).map((_, leftIndex) => ({ leftIndex, usageStage: usageStages[0] })),
 		...usageStages.map((usageStage) => ({ leftIndex: minimalLeft, usageStage })),

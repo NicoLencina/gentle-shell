@@ -2988,6 +2988,12 @@ function scopedDoubleEscCancelConfigHome(t: { after(callback: () => void): void 
 	return configHome;
 }
 
+function scopedUsageConfigHome(t: { after(callback: () => void): void }): string {
+	const configHome = mkdtempSync(join(tmpdir(), "gp-usage-cfg-"));
+	t.after(() => rmSync(configHome, { recursive: true, force: true }));
+	return configHome;
+}
+
 function findCustomizeRow(ui: FakeUi, label: string, width = 90): boolean {
 	const view = ui.overlayView!;
 	view.handleInput("\x1b[D");
@@ -5383,6 +5389,63 @@ test("gentleShell registers /gentle:usage and opens the subscriptions overlay", 
 	assert.match(plain[1], /✿ openai-codex · pro/);
 	ui.closeOverlay?.();
 	await opened;
+});
+
+// ---------------------------------------------------------------------------
+// /gentle:usage (issue #1653): no argument still opens the panel; on|off|status
+// read and write the global policy, and while it is off nothing is fetched and
+// no usage segment is drawn.
+// ---------------------------------------------------------------------------
+
+test("gentle:usage declares the on|off|status sub-actions without losing the panel", () => {
+	const { pi, commands } = fakePi();
+	gentleShell(pi, {});
+	const command = commands.get("gentle:usage");
+	assert.ok(command, "gentle:usage must be registered");
+	assert.match(command!.description ?? "", /on\|off\|status/);
+	assert.match(command!.description ?? "", /Press r to refetch/);
+});
+
+test("gentle:usage status reports on by default and writes nothing", async (t) => {
+	const configHome = scopedUsageConfigHome(t);
+	const { pi, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	await commands.get("gentle:usage")!.handler("status", ctx);
+	assert.equal(ui.notices.length, 1);
+	assert.match(ui.notices[0]!, /^usage window: on \(decided by built-in default\)/);
+	assert.equal(existsSync(join(configHome, "usage.json")), false);
+});
+
+test("gentle:usage off writes the global file, reports it, and takes effect immediately", async (t) => {
+	const configHome = scopedUsageConfigHome(t);
+	const { pi, handlers, commands } = fakePi();
+	const { fetchFn, calls } = fakeFetch();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { fetch: fetchFn, now: () => 1_788_600_000_000 });
+	const { ctx, ui } = fakeContext({ token: JWT });
+	await commands.get("gentle:usage")!.handler("off", ctx);
+	assert.match(ui.notices[0]!, /^usage window: off \(decided by global file/);
+	assert.match(ui.notices[0]!, /Wrote off to the global file/);
+	assert.deepEqual(JSON.parse(readFileSync(join(configHome, "usage.json"), "utf8")), { schema: "gentle-pi.usage/v1", policy: "off" });
+
+	// Off takes effect on the next refresh, not on the next restart.
+	await fire(handlers, "session_start", ctx);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(calls.length, 0, "off means no provider is fetched at all");
+	assert.doesNotMatch(renderFooter(ui), /codex 5h/, "no usage segment is drawn while off");
+});
+
+test("gentle:usage reports a malformed global file as fail-closed, not as an ordinary off", async (t) => {
+	const configHome = scopedUsageConfigHome(t);
+	mkdirSync(configHome, { recursive: true });
+	writeFileSync(join(configHome, "usage.json"), "{malformed");
+	const { pi, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	await commands.get("gentle:usage")!.handler("status", ctx);
+	assert.match(ui.notices[0]!, /^usage window: off \(decided by global file/);
+	assert.match(ui.notices[0]!, /malformed/);
+	assert.doesNotMatch(ui.notices[0]!, /\(decided by built-in default\)/);
 });
 
 test("usageShortcut defaults to alt+u and can be overridden or disabled", () => {
