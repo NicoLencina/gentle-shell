@@ -135,6 +135,39 @@ The panel rows a provider reports its windows with:
 - Only the plan name and the windows are kept; account details in the payload are discarded.
 - Gauges turn amber at 80% and red at 95%, like the context gauge.
 
+### Adding a provider
+
+Every provider gentle-shell ships is one entry in the single `USAGE_PROVIDERS` table in [`lib/shell-usage.ts`](../lib/shell-usage.ts). `SUPPORTED_USAGE_PROVIDERS`, `usageProvider(id)` and `providerNote(id)` are all derived from it, and the refresh path dispatches through it, so nothing else in the codebase branches per provider — there is no second list to update and no `if (provider === ...)` to add. An entry is `{ id, pendingNote, fetchUsage? }`:
+
+- `id` is the provider id exactly as Pi reports it in `ctx.model.provider`.
+- `pendingNote` is what the bar and the panel say while there is no snapshot yet.
+- `fetchUsage(apiKey, fetch, now)` reads that provider's own endpoint into the shared model. It is omitted only when the provider's windows arrive in the response headers of a normal turn (`anthropic`), which needs no request of ours.
+
+The endpoint URL is fixed inside the entry, so no user-supplied URL ever reaches it: a stored key can only be sent to an origin named in this repository. A fetch refuses redirects, asks for no stored copy, sends the key in a header only, keeps no cached copy, and degrades to no data without throwing on a malformed payload. Refresh stays throttled to at most once every 5 minutes per provider, plus session start and the panel's `r`. A provider that is not in the table at all is still reachable through the extension hook above.
+
+### Turning the window off
+
+`/gentle:usage` with no argument opens the panel; the sub-actions turn the whole window off and back on:
+
+```text
+/gentle:usage           Open the subscriptions panel.
+/gentle:usage status    Report the effective policy and the deciding source.
+/gentle:usage off       Write "off" to the global file.
+/gentle:usage on        Write "on" to the global file.
+```
+
+While it is off, no usage request is issued at all — not on session start, not on the `alt+u` shortcut, not on a turn's refresh, not on the panel's `r` — and no usage segment is drawn in the compact bar or the fullscreen header, so there is nothing to click into. `/gentle:usage` then reports the state and the command that turns it back on instead of opening the panel. The switch changes only whether the window exists: the fetch, throttling and the panel are otherwise untouched.
+
+The policy is global-only and on by default. `configHome` honors `GENTLE_PI_CONFIG_HOME` and defaults to `~/.pi/gentle-ai`:
+
+| Priority | Source                    | Notes                                                        |
+| -------- | ------------------------- | ------------------------------------------------------------ |
+| 1        | `<configHome>/usage.json` | Global file, written by `on`/`off`.                          |
+| 2        | `GENTLE_PI_USAGE`         | Exactly `on` or `off`. Any other value is ignored, and it decides only when the global file does not exist. |
+| 3        | Built-in default          | `on`.                                                        |
+
+The file uses the strict shape `{"schema":"gentle-pi.usage/v1","policy":"on"}`. A file that is present but malformed fails closed to `off` instead of falling through to the environment variable, and the command reports that case as a warning instead of an ordinary `off`.
+
 Gentle notices follow the selected card style. In `neon`, informational cards use the rounded frame in the theme's border role and an accent title; warning, error, and success cards use their own tone colors. In `float`, notices use the tone-background panel described below. The following example shows `neon`:
 
 ```text

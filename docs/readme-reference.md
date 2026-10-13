@@ -596,6 +596,7 @@ Synthetic tests prove the observer's behavior, not the cause of issue #213. A ne
 /gentle:models             Assign global model/effort routing to packaged/custom agents.
 /gentle:profiles           Create, switch, and manage global agent-model profiles.
 /gentle:persona            Switch between gentleman and neutral persona modes.
+/gentle:usage              Show or set the subscription usage window (on|off|status), or open the panel.
 /gentle:background-subagents  Show or set the managed background-subagents policy, with its deciding source.
 /gentle:review-mode          Show or set the receipt-driven development mode (status|enable|disable).
 /gentle:status-timing        Arm, clear, or inspect session-only STATUS diagnostics (enable|disable|show).
