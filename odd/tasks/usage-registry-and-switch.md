@@ -27,9 +27,9 @@ S5. House constraints carried by the issue (verbatim): "Per-provider requests ex
 
 | ID  | Specs                | Route                          | Commit |
 | --- | -------------------- | ------------------------------ | ------ |
-| T1  | S1, S2 (table)       | Inline, test-first: move the two fetchers into `lib/shell-usage.ts`, add `UsageProviderAdapter` + `USAGE_PROVIDERS`, derive `SUPPORTED_USAGE_PROVIDERS`, `usageProvider`, `providerNote`, and dispatch from the extension through the table | |
-| T2  | S2 (switch), S3, S4  | Inline, test-first: `lib/usage-policy.ts`, `/gentle:usage on|off|status`, no fetch and no segment while off, `usageEnabled` on the bar/header model | |
-| T3  | S2 (docs), S5        | Inline: document the table and the switch in `docs/gentle-shell.md` (and the command reference it lives in) | |
+| T1  | S1, S2 (table)       | Inline, test-first: move the two fetchers into `lib/shell-usage.ts`, add `UsageProviderAdapter` + `USAGE_PROVIDERS`, derive `SUPPORTED_USAGE_PROVIDERS`, `usageProvider`, `providerNote`, and dispatch from the extension through the table | f189eddda |
+| T2  | S2 (switch), S3, S4  | Inline, test-first: `lib/usage-policy.ts`, `/gentle:usage on|off|status`, no fetch and no segment while off, `usageEnabled` on the bar/header model | 9870acc94 |
+| T3  | S2 (docs), S5        | Inline: document the table and the switch in `docs/gentle-shell.md` (and the command reference it lives in) | b36849732 |
 
 ## Log
 
@@ -38,3 +38,7 @@ L1 (user, 2026-10-12, verbatim): "no, hagamos todo de cero , en español, siguie
 L2 (decisions, 2026-10-12): public texts in English with a Spanish translation for the user; native registry + switch, written from scratch on current `main`; reuse issue #1653 and request `status:approved` before any PR.
 
 L3 (evidence, 2026-10-12): fresh branch `feat/usage-registry-and-switch` created from `origin/main` (`d3d826c08`) in `/home/nicko-lencina/bench/gentle-shell`; the previous branch `feat/usage-window-providers` stays untouched as reference. On current `main` the closed surface is `SUPPORTED_USAGE_PROVIDERS` (literal, `lib/shell-usage.ts:120`) plus the ternary in `refreshProvider` (`extensions/gentle-shell.ts`), and the two fetchers live in the extension, not the lib.
+
+L4 (verification, 2026-10-12): T1 `f189eddda` (192 changed lines), T2 `9870acc94` (517), T3 `b36849732` (34); 683 insertions + 60 deletions across 11 files. Targeted suites green: 275 (`gentle-shell`) + 47 (`shell-usage`) + 60 (`shell-bar`) + 15 (`usage-policy`); `pnpm run typecheck` clean. The full suite's only failures are two pre-existing ones in `tests/session-changes-shell.test.ts`, reproduced identically on a clean `origin/main` worktree, so they belong to the environment, not this change.
+
+L5 (publication, 2026-10-12): branch pushed to the fork (`b3684973284e3050091ca03c76f4ffaceba8f219`); comment published at https://github.com/Gentleman-Programming/gentle-shell/issues/1653#issuecomment-6135210676 asking for `status:approved` and `size:exception` (743 changed lines; the switch alone is 517 and splitting it would leave `lib/usage-policy.ts` merged without a consumer). Delivery choice by the user: one single PR, not a chain. Next: open the PR once the label lands.
