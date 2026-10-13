@@ -3,7 +3,10 @@ import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
 	accountIdFromToken,
+	ANTHROPIC_PROVIDER,
+	CODEX_PROVIDER,
 	formatReset,
+	NAN_PROVIDER,
 	parseAnthropicHeaders,
 	parseCodexHeaders,
 	parseNanQuota,
@@ -15,6 +18,8 @@ import {
 	renderUsageBar,
 	renderUsagePanel,
 	SUPPORTED_USAGE_PROVIDERS,
+	USAGE_PROVIDERS,
+	usageProvider,
 	usageScopeProviders,
 	UsageSourceRegistry,
 	USAGE_SOURCE_SCHEMA,
@@ -282,6 +287,31 @@ test("nan is a supported usage provider with its own pending note", () => {
 	assert.ok(SUPPORTED_USAGE_PROVIDERS.includes("nan"));
 	assert.equal(providerNote("nan"), "no usage yet · r to fetch");
 	assert.deepEqual(renderUsagePanel([], plainTheme, 100, NOW, { provider: "nan" }), ["✿ nan · no usage yet · r to fetch"]);
+});
+
+// The provider table is the one place a built-in provider is described:
+// SUPPORTED_USAGE_PROVIDERS, usageProvider and providerNote all read it, so
+// adding a provider is one entry and no per-provider branch lives elsewhere.
+
+test("SUPPORTED_USAGE_PROVIDERS is the table's ids and every note comes from its entry", () => {
+	assert.deepEqual([...SUPPORTED_USAGE_PROVIDERS], ["openai-codex", "anthropic", "nan"], "the table's membership is pinned");
+	assert.deepEqual(SUPPORTED_USAGE_PROVIDERS, USAGE_PROVIDERS.map((provider) => provider.id));
+	for (const provider of USAGE_PROVIDERS) {
+		assert.equal(providerNote(provider.id), provider.pendingNote, `${provider.id}'s note comes from its own entry`);
+	}
+});
+
+test("usageProvider returns the adapter for a known id and nothing for an unknown one", () => {
+	assert.equal(usageProvider(CODEX_PROVIDER)?.id, CODEX_PROVIDER);
+	assert.equal(usageProvider(NAN_PROVIDER)?.id, NAN_PROVIDER);
+	assert.equal(usageProvider("acme-cloud"), undefined);
+	assert.equal(usageProvider(undefined), undefined);
+});
+
+test("only anthropic carries no fetchUsage because its windows arrive in headers", () => {
+	assert.equal(usageProvider(ANTHROPIC_PROVIDER)?.fetchUsage, undefined);
+	assert.equal(typeof usageProvider(CODEX_PROVIDER)?.fetchUsage, "function");
+	assert.equal(typeof usageProvider(NAN_PROVIDER)?.fetchUsage, "function");
 });
 
 // A generic hook: any extension can register a usage source for its own

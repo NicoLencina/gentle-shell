@@ -117,14 +117,32 @@ const ROLE = {
 	SEPARATOR: "muted",
 } as const;
 export const USAGE_EMPTY_MESSAGE = "No subscription usage yet. Usage arrives with the next response, or press r to fetch it.";
-export const SUPPORTED_USAGE_PROVIDERS: readonly string[] = [CODEX_PROVIDER, ANTHROPIC_PROVIDER, NAN_PROVIDER];
 const DEFAULT_PENDING_NOTE = "no usage yet · r to fetch";
-const PENDING_NOTE: Record<string, string> = {
-	[CODEX_PROVIDER]: DEFAULT_PENDING_NOTE,
-	[NAN_PROVIDER]: DEFAULT_PENDING_NOTE,
-	[ANTHROPIC_PROVIDER]: "usage arrives with the first response",
-};
 const UNSUPPORTED_NOTE = "no subscription usage for this provider";
+
+// One entry per built-in provider: its id, what it says before its first
+// answer, and how its windows are read. SUPPORTED_USAGE_PROVIDERS,
+// usageProvider and providerNote all derive from this table, so adding a
+// provider is one entry here and no per-provider branch anywhere else. The
+// Anthropic entry carries no fetchUsage on purpose: its windows arrive in the
+// response headers of a normal turn, so it needs no request of ours.
+export interface UsageProviderAdapter {
+	id: string;
+	pendingNote: string;
+	fetchUsage?(apiKey: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined>;
+}
+
+export const USAGE_PROVIDERS: readonly UsageProviderAdapter[] = [
+	{ id: CODEX_PROVIDER, pendingNote: DEFAULT_PENDING_NOTE, fetchUsage: fetchCodexUsage },
+	{ id: ANTHROPIC_PROVIDER, pendingNote: "usage arrives with the first response" },
+	{ id: NAN_PROVIDER, pendingNote: DEFAULT_PENDING_NOTE, fetchUsage: fetchNanUsage },
+];
+
+export const SUPPORTED_USAGE_PROVIDERS: readonly string[] = USAGE_PROVIDERS.map((provider) => provider.id);
+
+export function usageProvider(id: string | undefined): UsageProviderAdapter | undefined {
+	return id === undefined ? undefined : USAGE_PROVIDERS.find((provider) => provider.id === id);
+}
 const ACTIVE_MARK = "✿";
 // What a targeted provider with no snapshot says after a refresh actually ran
 // and answered nothing. Generic on purpose: it names no endpoint, key, or
@@ -194,7 +212,7 @@ export class UsageSourceRegistry {
 }
 
 export function providerNote(provider: string, registry?: UsageSourceRegistry): string {
-	return PENDING_NOTE[provider] ?? registry?.note(provider) ?? UNSUPPORTED_NOTE;
+	return usageProvider(provider)?.pendingNote ?? registry?.note(provider) ?? UNSUPPORTED_NOTE;
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -403,6 +421,43 @@ export function parseNanQuota(payload: unknown, now: number): ProviderUsage {
 		}
 	}
 	return { provider: NAN_PROVIDER, plan: undefined, limits, fetchedAt: now };
+}
+
+// The Codex usage endpoint is what the Codex CLI itself reads. The OAuth
+// token pi already holds carries the account id; nothing else is sent.
+export async function fetchCodexUsage(token: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined> {
+	if (!token) return undefined;
+	const accountId = accountIdFromToken(token);
+	if (!accountId) return undefined;
+	try {
+		const response = await fetchFn(CODEX_USAGE_URL, {
+			headers: { Authorization: `Bearer ${token}`, "chatgpt-account-id": accountId, originator: "pi", "User-Agent": "gentle-pi" },
+		});
+		if (!response.ok) return undefined;
+		return parseCodexUsage(await response.json(), now);
+	} catch {
+		return undefined;
+	}
+}
+
+// The NaN Cloud quota endpoint is the one the official dashboard reads with the
+// same API key pi already holds. The key travels in the header only: the request
+// refuses redirects so it cannot be replayed to another origin, asks for no
+// stored copy, and nothing here logs, renders, or persists it.
+export async function fetchNanUsage(apiKey: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined> {
+	if (!apiKey) return undefined;
+	try {
+		const response = await fetchFn(NAN_QUOTA_URL, {
+			redirect: "error",
+			cache: "no-store",
+			headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "User-Agent": "gentle-pi" },
+		});
+		if (!response.ok) return undefined;
+		const parsed = parseNanQuota(await response.json(), now);
+		return parsed.limits.length > 0 ? parsed : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 // Aggregation. NaN reports one allowance per metered model and the payload

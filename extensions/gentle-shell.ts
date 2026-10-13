@@ -115,7 +115,7 @@ import {
 	type DoubleEscCancelPolicy,
 	type DoubleEscCancelResolution,
 } from "../lib/double-esc-cancel-policy.ts";
-import { accountIdFromToken, CODEX_PROVIDER, CODEX_USAGE_URL, NAN_PROVIDER, NAN_QUOTA_URL, parseCodexUsage, parseNanQuota, parseProviderUsage, parseUsageHeaders, parseUsageSource, usageScopeProviders, UsageSourceRegistry, UsageStore, USAGE_SOURCE_EVENT, type ProviderUsage, type UsageSource } from "../lib/shell-usage.ts";
+import { parseProviderUsage, parseUsageHeaders, parseUsageSource, usageProvider, usageScopeProviders, UsageSourceRegistry, UsageStore, USAGE_SOURCE_EVENT, type ProviderUsage, type UsageSource } from "../lib/shell-usage.ts";
 import { UsageView } from "../lib/shell-usage-view.ts";
 import { sidebarHeader, sidebarPart, sidebarState, VISUAL_SETTINGS_CHANGED, type SidebarRail } from "../lib/shell-sidebar.ts";
 import { installSidebar, invalidateSidebar, narrowStatusOwner, SIDEBAR_BREAKPOINT, STATUS_OWNER } from "../lib/shell-sidebar-layout.ts";
@@ -1467,43 +1467,6 @@ export function devBinaryCard(notice: DevBinaryNotice): Card {
 
 const USAGE_REFRESH_MS = 5 * 60_000;
 
-// The Codex usage endpoint is what the Codex CLI itself reads. The OAuth
-// token pi already holds carries the account id; nothing else is sent.
-export async function fetchCodexUsage(token: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined> {
-	if (!token) return undefined;
-	const accountId = accountIdFromToken(token);
-	if (!accountId) return undefined;
-	try {
-		const response = await fetchFn(CODEX_USAGE_URL, {
-			headers: { Authorization: `Bearer ${token}`, "chatgpt-account-id": accountId, originator: "pi", "User-Agent": "gentle-pi" },
-		});
-		if (!response.ok) return undefined;
-		return parseCodexUsage(await response.json(), now);
-	} catch {
-		return undefined;
-	}
-}
-
-// The NaN Cloud quota endpoint is the one the official dashboard reads with the
-// same API key pi already holds. The key travels in the header only: the request
-// refuses redirects so it cannot be replayed to another origin, asks for no
-// stored copy, and nothing here logs, renders, or persists it.
-export async function fetchNanUsage(apiKey: string | undefined, fetchFn: typeof fetch, now: number): Promise<ProviderUsage | undefined> {
-	if (!apiKey) return undefined;
-	try {
-		const response = await fetchFn(NAN_QUOTA_URL, {
-			redirect: "error",
-			cache: "no-store",
-			headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "User-Agent": "gentle-pi" },
-		});
-		if (!response.ok) return undefined;
-		const parsed = parseNanQuota(await response.json(), now);
-		return parsed.limits.length > 0 ? parsed : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
 // A registered source is foreign code running inside a fire-and-forget
 // refresh: it must degrade exactly like the built-in fetchers above, never
 // throw past this call, and never leave an unhandled rejection behind.
@@ -1622,7 +1585,11 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	// concurrently: a stalled credential lookup or fetch for one can never hold
 	// the others — or the overlay opening on them — past its own window.
 	const refreshProvider = async (ctx: ExtensionContext, provider: string, source: UsageSource | undefined, force: boolean, now: number): Promise<boolean> => {
-		if (!source && provider !== CODEX_PROVIDER && provider !== NAN_PROVIDER) return false;
+		// A built-in provider answers through its table entry; a registered
+		// source answers for a provider gentle-shell has never heard of. A
+		// provider with neither has nothing to fetch.
+		const adapter = usageProvider(provider);
+		if (!source && !adapter?.fetchUsage) return false;
 		if (!force && now - (usageFetchedAt.get(provider) ?? 0) < USAGE_REFRESH_MS) return false;
 		usageFetchedAt.set(provider, now);
 		const generation = (usageGenerations.get(provider) ?? 0) + 1;
@@ -1659,9 +1626,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			if (controller.signal.aborted) return undefined;
 			return source
 				? fetchFromSource(source, apiKey, boundedFetch, deps.now())
-				: provider === NAN_PROVIDER
-					? fetchNanUsage(apiKey, boundedFetch, deps.now())
-					: fetchCodexUsage(apiKey, boundedFetch, deps.now());
+				: adapter?.fetchUsage?.(apiKey, boundedFetch, deps.now());
 		})();
 		// The race's loser still runs to completion in the background: guard it so
 		// its rejection (a foreign source escaping its own catch) can never
